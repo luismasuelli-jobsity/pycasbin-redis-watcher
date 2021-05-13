@@ -1,14 +1,19 @@
 from redis import Redis
+from rediscluster import RedisCluster
 from multiprocessing import Process, Pipe
 import time
 
 REDIS_CHANNEL_NAME = "casbin-role-watcher"
 
-def redis_casbin_subscription(redis_url, process_conn, redis_port=None,
-                              delay=0):
+
+def redis_casbin_subscription(process_conn, redis_host=None, redis_port=None,
+                              startup_nodes=None, delay=0):
     # in case we want to delay connecting to redis (redis connection failure)
     time.sleep(delay)
-    r = Redis(redis_url, redis_port)
+    if startup_nodes:
+        r = RedisCluster(startup_nodes)
+    else:
+        r = Redis(redis_host, redis_port)
     p = r.pubsub()
     p.subscribe(REDIS_CHANNEL_NAME)
     print("Waiting for casbin policy updates...")
@@ -37,7 +42,16 @@ def redis_casbin_subscription(redis_url, process_conn, redis_port=None,
 
 
 class RedisWatcher(object):
-    def __init__(self, redis_host, redis_port=None, start_process=True):
+    def __init__(self, redis_host=None, redis_port=None, redis_startup_nodes=None, start_process=True):
+        if (redis_host is not None or redis_port is not None) and redis_startup_nodes is not None:
+            raise RuntimeError("Both cluster and standalone settings are specified "
+                               "on RedisWatcher. Either set redis_startuo_nodes to "
+                               "None, or set both redis_host and redis_port to Nne")
+        if not redis_startup_nodes and not redis_host:
+            redis_host = '127.0.0.1'
+        if isinstance(redis_startup_nodes, str):
+            redis_startup_nodes = [{"host": host, "port": 6379} for host in redis_startup_nodes.split(",")]
+        self.startup_nodes = redis_startup_nodes
         self.redis_url = redis_host
         self.redis_port = redis_port
         self.subscribed_process, self.parent_conn = \
@@ -46,7 +60,7 @@ class RedisWatcher(object):
     def create_subscriber_process(self, start_process=True, delay=0):
         parent_conn, child_conn = Pipe()
         p = Process(target=redis_casbin_subscription,
-                    args=(self.redis_url, child_conn, self.redis_port, delay),
+                    args=(child_conn, self.redis_url, self.redis_port, self.startup_nodes, delay),
                     daemon=True)
         if start_process:
             p.start()
